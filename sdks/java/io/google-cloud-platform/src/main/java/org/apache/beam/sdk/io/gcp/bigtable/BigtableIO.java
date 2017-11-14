@@ -55,6 +55,7 @@ import org.apache.beam.sdk.io.range.ByteKey;
 import org.apache.beam.sdk.io.range.ByteKeyRange;
 import org.apache.beam.sdk.io.range.ByteKeyRangeTracker;
 import org.apache.beam.sdk.options.PipelineOptions;
+import org.apache.beam.sdk.options.ValueProvider;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
@@ -207,7 +208,7 @@ public class BigtableIO {
   public static Write write() {
     return new AutoValue_BigtableIO_Write.Builder()
         .setTableId("")
-        .setValidate(true)
+        .setBigtableConfig(BigtableConfig.create().withValidation(true))
         .build();
   }
 
@@ -362,11 +363,11 @@ public class BigtableIO {
       super.populateDisplayData(builder);
 
       builder.add(DisplayData.item("tableId", getTableId())
-        .withLabel("Table ID"));
+          .withLabel("Table ID"));
 
       if (getBigtableOptions() != null) {
         builder.add(DisplayData.item("bigtableOptions", getBigtableOptions().toString())
-          .withLabel("Bigtable Options"));
+            .withLabel("Bigtable Options"));
       }
 
       builder.addIfNotDefault(
@@ -374,7 +375,7 @@ public class BigtableIO {
 
       if (getRowFilter() != null) {
         builder.add(DisplayData.item("rowFilter", getRowFilter().toString())
-          .withLabel("Table Row Filter"));
+            .withLabel("Table Row Filter"));
       }
     }
 
@@ -437,33 +438,48 @@ public class BigtableIO {
   public abstract static class Write
       extends PTransform<PCollection<KV<ByteString, Iterable<Mutation>>>, PDone> {
 
-    /** Returns the table being written to. */
-    @Nullable
-    abstract String getTableId();
+    abstract BigtableConfig getBigtableConfig();
 
-    @Nullable
-    abstract BigtableService getBigtableService();
+    abstract Builder toBuilder();
 
     /** Returns the Google Cloud Bigtable instance being written to, and other parameters. */
     @Nullable
-    public abstract BigtableOptions getBigtableOptions();
-
-    abstract boolean getValidate();
-
-    abstract Builder toBuilder();
+    public BigtableOptions getBigtableOptions() {
+      ValueProvider<BigtableOptions> options = getBigtableConfig().getBigtableOptions();
+      return options == null || !options.isAccessible() ? null : options.get();
+    }
 
     @AutoValue.Builder
     abstract static class Builder {
 
-      abstract Builder setTableId(String tableId);
-
-      abstract Builder setBigtableOptions(BigtableOptions options);
-
-      abstract Builder setBigtableService(BigtableService bigtableService);
-
-      abstract Builder setValidate(boolean validate);
+      abstract Builder setBigtableConfig(BigtableConfig bigtableConfig);
 
       abstract Write build();
+    }
+
+    /** Specifies the Bigtable configuration. */
+    public Write withBigtableConfig(BigtableConfig config) {
+      return toBuilder().setBigtableConfig(config).build();
+    }
+
+    /** Specifies the Bigtable options. */
+    public Write withBigtableOptions(ValueProvider<BigtableOptions> options) {
+      ValueProvider<BigtableOptions> wrappedOptions = ValueProvider.NestedValueProvider.of(options,
+          new SerializableFunction<BigtableOptions, BigtableOptions>() {
+            @Override
+            public BigtableOptions apply(BigtableOptions input) {
+              return input.toBuilder()
+                  .setBulkOptions(
+                      input.getBulkOptions().toBuilder()
+                          .setUseBulkApi(true)
+                          .build())
+                  .setUseCachedDataPool(true)
+                  .build();
+            }
+          });
+
+      BigtableConfig config = getBigtableConfig();
+      return toBuilder().setBigtableConfig(config.withBigtableOptions(wrappedOptions)).build();
     }
 
     /**
@@ -473,12 +489,14 @@ public class BigtableIO {
      * <p>Does not modify this object.
      */
     public Write withBigtableOptions(BigtableOptions options) {
-      return withBigtableOptions(options.toBuilder());
+      return withBigtableOptions(ValueProvider.StaticValueProvider.of(options.toBuilder().build()));
     }
 
     /**
      * Returns a new {@link BigtableIO.Write} that will write to the Cloud Bigtable instance
      * indicated by the given options, and using any other specified customizations.
+     *
+     * <p>Proje
      *
      * <p>Clones the given {@link BigtableOptions} builder so that any further changes
      * will have no effect on the returned {@link BigtableIO.Write}.
@@ -486,63 +504,35 @@ public class BigtableIO {
      * <p>Does not modify this object.
      */
     public Write withBigtableOptions(BigtableOptions.Builder optionsBuilder) {
-      checkArgument(optionsBuilder != null, "optionsBuilder can not be null");
-      // TODO: is there a better way to clone a Builder? Want it to be immune from user changes.
-      BigtableOptions options = optionsBuilder.build();
+      return withBigtableOptions(optionsBuilder.build());
+    }
 
-      // Set useBulkApi to true for enabling bulk writes
-      BigtableOptions.Builder clonedBuilder = options.toBuilder()
-          .setBulkOptions(
-              options.getBulkOptions().toBuilder()
-                  .setUseBulkApi(true)
-                  .build())
-          .setUseCachedDataPool(true);
-      BigtableOptions clonedOptions = clonedBuilder.build();
-      return toBuilder().setBigtableOptions(clonedOptions).build();
+    /** Specifies the Bigtable table. */
+    public Write withTableId(ValueProvider<String> tableId) {
+      BigtableConfig config = getBigtableConfig();
+      return withBigtableConfig(config.withTableId(tableId));
+    }
+
+    /** Specifies the Bigtable table. */
+    public Write withTableId(String tableId) {
+      return withTableId(ValueProvider.StaticValueProvider.of(tableId));
+    }
+
+    /** Specifies the weather before operation table existence should be checked. */
+    public Write withValidation(ValueProvider<Boolean> isEnabled) {
+      BigtableConfig config = getBigtableConfig();
+      return withBigtableConfig(config.withValidation(isEnabled));
+    }
+
+    /** Specifies the weather before operation table existence should be checked. */
+    public Write withValidation(boolean isEnabled) {
+      return withValidation(ValueProvider.StaticValueProvider.of(isEnabled));
     }
 
     /** Disables validation that the table being written to exists. */
+    @Deprecated
     public Write withoutValidation() {
-      return toBuilder().setValidate(false).build();
-    }
-
-    /**
-     * Returns a new {@link BigtableIO.Write} that will write to the specified table.
-     *
-     * <p>Does not modify this object.
-     */
-    public Write withTableId(String tableId) {
-      checkArgument(tableId != null, "tableId can not be null");
-      return toBuilder().setTableId(tableId).build();
-    }
-
-    @Override
-    public PDone expand(PCollection<KV<ByteString, Iterable<Mutation>>> input) {
-      checkArgument(getBigtableOptions() != null, "withBigtableOptions() is required");
-      checkArgument(getTableId() != null && !getTableId().isEmpty(), "withTableId() is required");
-
-      input.apply(ParDo.of(new BigtableWriterFn(getTableId(),
-          new SerializableFunction<PipelineOptions, BigtableService>() {
-        @Override
-        public BigtableService apply(PipelineOptions options) {
-          return getBigtableService(options);
-        }
-      })));
-      return PDone.in(input.getPipeline());
-    }
-
-    @Override
-    public void validate(PipelineOptions options) {
-      if (getValidate()) {
-        try {
-          checkArgument(
-              getBigtableService(options).tableExists(getTableId()),
-              "Table %s does not exist",
-              getTableId());
-        } catch (IOException e) {
-          LOG.warn("Error checking whether table {} exists; proceeding.", getTableId(), e);
-        }
-      }
+      return withValidation(false);
     }
 
     /**
@@ -554,60 +544,50 @@ public class BigtableIO {
      * <p>Does not modify this object.
      */
     Write withBigtableService(BigtableService bigtableService) {
-      checkArgument(bigtableService != null, "bigtableService can not be null");
-      return toBuilder().setBigtableService(bigtableService).build();
+      BigtableConfig config = getBigtableConfig();
+      return withBigtableConfig(config.withBigtableService(bigtableService));
+    }
+
+    @Override
+    public PDone expand(PCollection<KV<ByteString, Iterable<Mutation>>> input) {
+      getBigtableConfig().validate();
+
+      input.apply(ParDo.of(new BigtableWriterFn(getBigtableConfig(),
+          new SerializableFunction<PipelineOptions, BigtableService>() {
+            @Override
+            public BigtableService apply(PipelineOptions options) {
+              return getBigtableConfig().getBigtableService(options);
+            }
+          })));
+      return PDone.in(input.getPipeline());
+    }
+
+    @Override
+    public void validate(PipelineOptions options) {
+      if (getBigtableConfig().getValidation() != null && getBigtableConfig().getValidation().get()) {
+        String tableId = checkNotNull(getBigtableConfig().getTableId().get(),  "table id");
+        try {
+          checkArgument(
+              getBigtableConfig().getBigtableService(options).tableExists(tableId),
+              "Table %s does not exist",
+              tableId);
+        } catch (IOException e) {
+          LOG.warn("Error checking whether table {} exists; proceeding.", tableId, e);
+        }
+      }
     }
 
     @Override
     public void populateDisplayData(DisplayData.Builder builder) {
       super.populateDisplayData(builder);
-
-      builder.add(DisplayData.item("tableId", getTableId())
-        .withLabel("Table ID"));
-
-      if (getBigtableOptions() != null) {
-        builder.add(DisplayData.item("bigtableOptions", getBigtableOptions().toString())
-          .withLabel("Bigtable Options"));
-      }
-    }
-
-    @Override
-    public String toString() {
-      return MoreObjects.toStringHelper(Write.class)
-          .add("options", getBigtableOptions())
-          .add("tableId", getTableId())
-          .toString();
-    }
-
-    /**
-     * Helper function that either returns the mock Bigtable service supplied by
-     * {@link #withBigtableService} or creates and returns an implementation that talks to
-     * {@code Cloud Bigtable}.
-     *
-     * <p>Also populate the credentials option from {@link GcpOptions#getGcpCredential()} if the
-     * default credentials are being used on {@link BigtableOptions}.
-     */
-    @VisibleForTesting
-    BigtableService getBigtableService(PipelineOptions pipelineOptions) {
-      if (getBigtableService() != null) {
-        return getBigtableService();
-      }
-      BigtableOptions.Builder clonedOptions = getBigtableOptions().toBuilder();
-      clonedOptions.setUserAgent(pipelineOptions.getUserAgent());
-      if (getBigtableOptions().getCredentialOptions()
-          .getCredentialType() == CredentialType.DefaultCredentials) {
-        clonedOptions.setCredentialOptions(
-            CredentialOptions.credential(
-                pipelineOptions.as(GcpOptions.class).getGcpCredential()));
-      }
-      return new BigtableServiceImpl(clonedOptions.build());
+      getBigtableConfig().populateDisplayData(builder);
     }
 
     private class BigtableWriterFn extends DoFn<KV<ByteString, Iterable<Mutation>>, Void> {
 
-      public BigtableWriterFn(String tableId,
-          SerializableFunction<PipelineOptions, BigtableService> bigtableServiceFactory) {
-        this.tableId = checkNotNull(tableId, "tableId");
+      public BigtableWriterFn(BigtableConfig config,
+                              SerializableFunction<PipelineOptions, BigtableService> bigtableServiceFactory) {
+        this.config = config;
         this.bigtableServiceFactory =
             checkNotNull(bigtableServiceFactory, "bigtableServiceFactory");
         this.failures = new ConcurrentLinkedQueue<>();
@@ -616,6 +596,8 @@ public class BigtableIO {
       @StartBundle
       public void startBundle(StartBundleContext c) throws IOException {
         if (bigtableWriter == null) {
+          String tableId = checkNotNull(config.getTableId().get(), "table id");
+
           bigtableWriter = bigtableServiceFactory.apply(
               c.getPipelineOptions()).openForWriting(tableId);
         }
@@ -651,7 +633,7 @@ public class BigtableIO {
       }
 
       ///////////////////////////////////////////////////////////////////////////////
-      private final String tableId;
+      private final BigtableConfig config;
       private final SerializableFunction<PipelineOptions, BigtableService> bigtableServiceFactory;
       private BigtableService.Writer bigtableWriter;
       private long recordsWritten;
@@ -1069,8 +1051,8 @@ public class BigtableIO {
       BigtableSource primary;
       BigtableSource residual;
       try {
-         primary = source.withEndKey(splitKey);
-         residual =  source.withStartKey(splitKey);
+        primary = source.withEndKey(splitKey);
+        residual =  source.withStartKey(splitKey);
       } catch (RuntimeException e) {
         LOG.info(
             "{}: Interpolating for fraction {} yielded invalid split key {}.",
